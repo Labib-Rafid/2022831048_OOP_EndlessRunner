@@ -26,15 +26,22 @@ abstract class Entity {
     public abstract void update(float delta);
     public abstract void draw(Batch batch);
 
-    public Rectangle getRectangle() {
-        return rect;
+    /* CODE SMELL FIX: Feature Envy
+       Previously GameScreen accessed getRectangle() and handled collision.
+       Now collision responsibility belongs to Entity itself.
+     */
+    public boolean collidesWith(Entity other) {
+        return rect.overlaps(other.rect);
     }
 }
 
 class Player extends Entity {
+
     private float gravity = -800f, velocityY = 0;
     private boolean isJumping = false, isCrouching = false;
+
     private float normalHeight = 100, crouchHeight = 60;
+
     private Animation<TextureRegion> runAnimation;
     private float stateTime = 0f;
 
@@ -52,10 +59,13 @@ class Player extends Entity {
 
     public void crouch(boolean down) {
         if (!isJumping) {
+
             if (down && !isCrouching) {
                 isCrouching = true;
                 rect.height = crouchHeight;
-            } else if (!down && isCrouching) {
+            }
+
+            else if (!down && isCrouching) {
                 isCrouching = false;
                 rect.height = normalHeight;
             }
@@ -64,6 +74,7 @@ class Player extends Entity {
 
     @Override
     public void update(float delta) {
+
         velocityY += gravity * delta;
         rect.y += velocityY * delta;
 
@@ -84,6 +95,7 @@ class Player extends Entity {
 }
 
 class Obstacle extends Entity {
+
     private Texture texture;
 
     public Obstacle(float x, float y, float width, float height, Texture texture) {
@@ -106,19 +118,140 @@ class Obstacle extends Entity {
     }
 }
 
-public class GameScreen implements Screen {
-    private SpriteBatch batch;
-    private Player player;
-    private Array<Obstacle> obstacles;
+
+/* CODE SMELL FIX: Inappropriate Intimacy + Shotgun Surgery
+   GameScreen previously managed obstacle spawning, updating,
+   collision checking and removal.
+
+   If obstacle behavior changed -> GameScreen needed changes everywhere.
+   Now all obstacle logic is centralized here.
+*/
+
+class ObstacleManager {
+
+    private Array<Obstacle> obstacles = new Array<>();
     private Texture obstacleTexture;
-    private Texture backgroundTexture;
-    private float backgroundX = 0;
-    private TextureRegion[] runFrames;
-    private Animation<TextureRegion> runAnimation;
-    private BitmapFont font;
     private long lastObstacleTime;
+
+    public ObstacleManager(Texture texture) {
+        this.obstacleTexture = texture;
+        spawnObstacle();
+    }
+
+    private void spawnObstacle() {
+
+        float y = Math.random() < 0.5 ? 200 : 280;
+
+        obstacles.add(
+            new Obstacle(
+                Gdx.graphics.getWidth(),
+                y,
+                50,
+                50,
+                obstacleTexture
+            )
+        );
+
+        lastObstacleTime = TimeUtils.nanoTime();
+    }
+
+    public boolean update(float delta, Player player) {
+
+        if (TimeUtils.nanoTime() - lastObstacleTime > 1000000000) {
+            spawnObstacle();
+        }
+
+        Iterator<Obstacle> iter = obstacles.iterator();
+
+        while (iter.hasNext()) {
+
+            Obstacle obs = iter.next();
+            obs.update(delta);
+
+            if (obs.isOffScreen()) {
+                iter.remove();
+            }
+
+            if (obs.collidesWith(player)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public void draw(Batch batch) {
+
+        for (Obstacle obs : obstacles) {
+            obs.draw(batch);
+        }
+    }
+}
+
+
+/* CODE SMELL FIX: Divergent Change
+   GameScreen previously handled score logic and timer.
+
+   If scoring rules changed -> GameScreen needed modification.
+
+   ScoreManager isolates score behavior.
+*/
+
+class ScoreManager {
+
     private int score;
     private float scoreTimer = 0f;
+
+    public void update(float delta) {
+
+        scoreTimer += delta;
+
+        while (scoreTimer >= 1f) {
+            score += 10;
+            scoreTimer -= 1f;
+        }
+    }
+
+    public int getScore() {
+        return score;
+    }
+
+    public void draw(Batch batch, BitmapFont font) {
+
+        /* CODE SMELL FIX: Message Chain / Responsibility
+           Drawing score handled inside ScoreManager
+        */
+
+        font.draw(batch,
+            "Score: " + score,
+            20,
+            Gdx.graphics.getHeight() - 20);
+    }
+}
+
+
+
+public class GameScreen implements Screen {
+
+    private SpriteBatch batch;
+
+    private Player player;
+
+    /* GameScreen no longer directly manages obstacle list */
+    private ObstacleManager obstacleManager;
+
+    /* Score handled by separate class */
+    private ScoreManager scoreManager;
+
+    private Texture obstacleTexture;
+    private Texture backgroundTexture;
+
+    private float backgroundX = 0;
+
+    private TextureRegion[] runFrames;
+    private Animation<TextureRegion> runAnimation;
+
+    private BitmapFont font;
 
     final Main game;
 
@@ -128,12 +261,21 @@ public class GameScreen implements Screen {
 
     @Override
     public void show() {
+
         batch = new SpriteBatch();
 
         Texture runSheet = new Texture("running_boy_green.png");
-        TextureRegion[][] tmp = TextureRegion.split(runSheet, runSheet.getWidth() / 3, runSheet.getHeight() / 2);
+
+        TextureRegion[][] tmp = TextureRegion.split(
+            runSheet,
+            runSheet.getWidth() / 3,
+            runSheet.getHeight() / 2
+        );
+
         runFrames = new TextureRegion[6];
+
         int index = 0;
+
         for (TextureRegion[] row : tmp)
             for (TextureRegion frame : row)
                 runFrames[index++] = frame;
@@ -141,95 +283,90 @@ public class GameScreen implements Screen {
         runAnimation = new Animation<>(0.1f, runFrames);
 
         player = new Player(runAnimation);
-        obstacles = new Array<>();
 
         backgroundTexture = new Texture("Greenery_Back.png");
         obstacleTexture = new Texture("neon_rectangle.jpg");
 
-        spawnObstacle();
+        /* initialize managers */
+        obstacleManager = new ObstacleManager(obstacleTexture);
+        scoreManager = new ScoreManager();
 
         font = new BitmapFont();
         font.getData().setScale(2f);
-        score = 0;
-    }
-
-    private void spawnObstacle() {
-        float y = Math.random() < 0.5 ? 200 : 280;
-        Obstacle obstacle = new Obstacle(Gdx.graphics.getWidth(), y, 50, 50, obstacleTexture);
-        obstacles.add(obstacle);
-        lastObstacleTime = TimeUtils.nanoTime();
     }
 
     private void handleInput() {
+
         if (Gdx.input.isKeyJustPressed(Input.Keys.UP)) {
             player.jump();
         }
+
         if (Gdx.input.isKeyPressed(Input.Keys.DOWN)) {
             player.crouch(true);
-        } else {
+        }
+
+        else {
             player.crouch(false);
         }
     }
 
     @Override
     public void render(float delta) {
+
         Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT);
+
         handleInput();
 
-        // Background scrolling
         backgroundX -= 100 * delta;
+
         if (backgroundX <= -Gdx.graphics.getWidth()) {
             backgroundX = 0;
         }
 
         player.update(delta);
 
-        if (TimeUtils.nanoTime() - lastObstacleTime > 1000000000) {
-            spawnObstacle();
+        /* ObstacleManager now controls obstacle update and collision */
+        boolean collided = obstacleManager.update(delta, player);
+
+        if (collided) {
+            game.setScreen(new GameOverScreen(game, scoreManager.getScore()));
+            dispose();
+            return;
         }
 
-        Iterator<Obstacle> iter = obstacles.iterator();
-        while (iter.hasNext()) {
-            Obstacle obs = iter.next();
-            obs.update(delta);
-            if (obs.isOffScreen()) {
-                iter.remove();
-                score++;
-            }
-            if (obs.getRectangle().overlaps(player.getRectangle())) {
-                game.setScreen(new GameOverScreen(game, score));
-                dispose();
-                return;
-            }
-        }
-
-        // Increase score by 10 every second
-        scoreTimer += delta;
-        while (scoreTimer >= 1.0f) {
-            score += 10;
-            scoreTimer -= 1.0f;
-        }
+        scoreManager.update(delta);
 
         batch.begin();
-        batch.draw(backgroundTexture, backgroundX, 0, Gdx.graphics.getWidth(), Gdx.graphics.getHeight());
-        batch.draw(backgroundTexture, backgroundX + Gdx.graphics.getWidth(), 0, Gdx.graphics.getWidth(), Gdx.graphics.getHeight());
+
+        batch.draw(backgroundTexture,
+            backgroundX,
+            0,
+            Gdx.graphics.getWidth(),
+            Gdx.graphics.getHeight());
+
+        batch.draw(backgroundTexture,
+            backgroundX + Gdx.graphics.getWidth(),
+            0,
+            Gdx.graphics.getWidth(),
+            Gdx.graphics.getHeight());
 
         player.draw(batch);
-        for (Obstacle obs : obstacles) {
-            obs.draw(batch);
-        }
 
-        font.draw(batch, "Score: " + score, 20, Gdx.graphics.getHeight() - 20);
+        obstacleManager.draw(batch);
+
+        scoreManager.draw(batch, font);
+
         batch.end();
     }
 
-    @Override public void resize(int width, int height) { }
-    @Override public void pause() { }
-    @Override public void resume() { }
-    @Override public void hide() { }
+    @Override public void resize(int width, int height) {}
+    @Override public void pause() {}
+    @Override public void resume() {}
+    @Override public void hide() {}
 
     @Override
     public void dispose() {
+
         batch.dispose();
         obstacleTexture.dispose();
         backgroundTexture.dispose();
